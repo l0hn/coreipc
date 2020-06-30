@@ -20,7 +20,7 @@ namespace UiPath.CoreIpc
     using BeforeCallHandler = Func<CallInfo, CancellationToken, Task>;
     using InvokeAsyncDelegate = Func<IServiceClient, string, object[], object>;
 
-    interface IServiceClient : IDisposable
+    public interface IServiceClient : IDisposable
     {
         Task<TResult> InvokeAsync<TResult>(string methodName, object[] args);
     }
@@ -34,8 +34,36 @@ namespace UiPath.CoreIpc
         protected readonly BeforeCallHandler _beforeCall;
         protected readonly EndpointSettings _serviceEndpoint;
         private readonly AsyncLock _connectionLock = new AsyncLock();
-        protected Connection _connection;
+
+        private bool _connected;
+
+        public event EventHandler Disconnected; 
+        public event EventHandler Connected;
+
+        protected virtual void OnDisconnected()
+        {
+            if (!_connected)
+            {
+                return;
+            }
+
+            _connected = false;
+            Disconnected?.Invoke(this, EventArgs.Empty);
+        }
+
+        protected virtual void OnConnected()
+        {
+            _connected = true;
+            Connected?.Invoke(this, EventArgs.Empty);
+        }
+
+        public Connection Connection
+        {
+            get => _connection;
+        }
+
         private Server _server;
+        private Connection _connection;
 
         internal ServiceClient(ISerializer serializer, TimeSpan requestTimeout, ILogger logger, ConnectionFactory connectionFactory, bool encryptAndSign = false, BeforeCallHandler beforeCall = null, EndpointSettings serviceEndpoint = null)
         {
@@ -104,10 +132,23 @@ namespace UiPath.CoreIpc
             Task<TResult> InvokeAsync() =>
                 cancellationToken.WithTimeout(timeout, async token =>
                 {
-                    bool newConnection;
+                    bool newConnection = false;
                     using (await _connectionLock.LockAsync(token))
                     {
-                        newConnection = await EnsureConnection(token);
+                        await token.WithTimeout(TimeSpan.FromSeconds(2),
+                            async token1 => { newConnection = await EnsureConnection(token1); }, "connect",
+                            ex =>
+                            {
+                                OnDisconnected();
+                                throw ex;
+                                return Task.CompletedTask;
+                            });
+                        //newConnection = await EnsureConnection(cancellationToken.WithTimeout(TimeSpan.FromSeconds(2), ));
+                    }
+
+                    if (newConnection)
+                    {
+                        OnConnected();
                     }
                     await _beforeCall(new CallInfo(newConnection), token);
                     var requestId = _connection.NewRequestId();
@@ -199,7 +240,7 @@ namespace UiPath.CoreIpc
         private static readonly MethodInfo InvokeAsyncMethod = typeof(IServiceClient).GetMethod(nameof(IServiceClient.InvokeAsync));
         private static readonly ConcurrentDictionary<Type, InvokeAsyncDelegate> _invokeAsyncByType = new ConcurrentDictionary<Type, InvokeAsyncDelegate>();
 
-        internal IServiceClient ServiceClient { get; set; }
+        public IServiceClient ServiceClient { get; set; }
 
         protected override object Invoke(MethodInfo targetMethod, object[] args) => GetInvokeAsync(targetMethod.ReturnType)(ServiceClient, targetMethod.Name, args);
 
