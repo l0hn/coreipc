@@ -13,6 +13,7 @@ using System.Net.Security;
 using System.Security.Principal;
 using System.Net;
 using System.Diagnostics;
+using System.IO.Pipes;
 
 namespace UiPath.CoreIpc
 {
@@ -53,6 +54,9 @@ namespace UiPath.CoreIpc
 
         protected virtual void OnConnected()
         {
+            if (_connected)
+                return;
+            
             _connected = true;
             Connected?.Invoke(this, EventArgs.Empty);
         }
@@ -146,15 +150,20 @@ namespace UiPath.CoreIpc
                         //newConnection = await EnsureConnection(cancellationToken.WithTimeout(TimeSpan.FromSeconds(2), ));
                     }
 
-                    if (newConnection)
-                    {
-                        OnConnected();
-                    }
+                    OnConnected();
+                    
                     await _beforeCall(new CallInfo(newConnection), token);
                     var requestId = _connection.NewRequestId();
                     var arguments = args.Select(_serializer.Serialize).ToArray();
                     var request = new Request(typeof(TInterface).Name, requestId, methodName, arguments, messageTimeout);
                     _logger?.LogInformation($"IpcClient calling {methodName} {requestId} {Name}.");
+                    var npStream = _connection.Network as NamedPipeServerStream;
+                    if (npStream != null && !npStream.IsConnected)
+                    {
+                        //TODO: use a better exception class
+                        OnDisconnected();
+                        throw new UnauthorizedAccessException("pipe is not connected");
+                    }
                     var response = await _connection.Send(request, token);
                     _logger?.LogInformation($"IpcClient called {methodName} {requestId} {Name}.");
                     return _serializer.Deserialize<TResult>(response.CheckError().Data ?? "");
