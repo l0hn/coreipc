@@ -132,13 +132,18 @@ namespace UiPath.CoreIpc
             var cancellationToken = args.OfType<CancellationToken>().LastOrDefault();
             var messageTimeout = (args.OfType<Message>().FirstOrDefault()?.RequestTimeout.TotalSeconds).GetValueOrDefault();
             var timeout = messageTimeout == 0 ? _requestTimeout : TimeSpan.FromSeconds(messageTimeout);
+            
+            LogHandler.Log($"Executing method '{methodName}'. timeout: {timeout}");
             return await Task.Run(InvokeAsync).ConfigureAwait(false);
+            
             Task<TResult> InvokeAsync() =>
                 cancellationToken.WithTimeout(timeout, async token =>
                 {
                     bool newConnection = false;
+                    LogHandler.Log("waiting for connection lock");
                     using (await _connectionLock.LockAsync(token))
                     {
+                        LogHandler.Log("Waiting for ensure connection");
                         await token.WithTimeout(TimeSpan.FromSeconds(2),
                             async token1 => { newConnection = await EnsureConnection(token1); }, "connect",
                             ex =>
@@ -152,23 +157,29 @@ namespace UiPath.CoreIpc
 
                     OnConnected();
                     
+                    LogHandler.Log("Waiting for beforeCall");
                     await _beforeCall(new CallInfo(newConnection), token);
                     var requestId = _connection.NewRequestId();
                     var arguments = args.Select(_serializer.Serialize).ToArray();
                     var request = new Request(typeof(TInterface).Name, requestId, methodName, arguments, messageTimeout);
-                    _logger?.LogInformation($"IpcClient calling {methodName} {requestId} {Name}.");
+                    _logger?.LogInformation($"IpcClient calling {methodName} {requestId} {Name}."); 
+                    LogHandler.Log($"IpcClient calling {methodName} {requestId} {Name}.");
                     var npStream = _connection.Network as NamedPipeServerStream;
                     if (npStream != null && !npStream.IsConnected)
                     {
+                        LogHandler.Log("pipe is not connected");
                         //TODO: use a better exception class
                         OnDisconnected();
                         throw new UnauthorizedAccessException("pipe is not connected");
                     }
+                    LogHandler.Log("sending request over connection");
                     var response = await _connection.Send(request, token);
+                    LogHandler.Log($"IpcClient called {methodName} {requestId} {Name}.");
                     _logger?.LogInformation($"IpcClient called {methodName} {requestId} {Name}.");
                     return _serializer.Deserialize<TResult>(response.CheckError().Data ?? "");
                 }, methodName, ex =>
                 {
+                    LogHandler.Log($"Exception while calling method {methodName}, {ex.Message}");
                     var exception = ex;
                     if (cancellationToken.IsCancellationRequested && !(ex is TaskCanceledException))
                     {
